@@ -19,7 +19,6 @@ import requests
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, TwoCellAnchor
-from PIL import Image as PILImage
 from playwright.sync_api import sync_playwright
 
 DEFAULT_URL = "https://www.bigc.co.th/en/category/battery?sort=nameasc&limit=90"
@@ -117,19 +116,15 @@ SESSION.headers.update(HEADERS)
 
 
 def image_candidates(url: str):
-    """Original url first, then the same image without Cloudflare's /cdn-cgi/image/... transform."""
+    """Try the untransformed image before Cloudflare's potentially resized version."""
     if url.startswith("//"):
         url = "https:" + url
-    urls = [url]
     plain = re.sub(r"/cdn-cgi/image/[^/]+/", "/", url)
-    if plain != url:
-        urls.append(plain)
-    return urls
+    return [plain, url] if plain != url else [url]
 
 
-def fetch_png(url: str) -> io.BytesIO:
-    """Download an image (any format, incl. webp) and return it as square PNG bytes.
-    Retries on 403/429/5xx and falls back to the untransformed image URL."""
+def fetch_image(url: str) -> io.BytesIO:
+    """Download the original image bytes, falling back to transformed URLs if needed."""
     last_err = None
     for u in image_candidates(url):
         for attempt in range(3):
@@ -140,14 +135,7 @@ def fetch_png(url: str) -> io.BytesIO:
                     time.sleep(1.5 * (attempt + 1))
                     continue
                 r.raise_for_status()
-                im = PILImage.open(io.BytesIO(r.content)).convert("RGBA")
-                im.thumbnail((200, 200))
-                canvas = PILImage.new("RGBA", (200, 200), (255, 255, 255, 0))
-                canvas.paste(im, ((200 - im.width) // 2, (200 - im.height) // 2))
-                out = io.BytesIO()
-                canvas.save(out, format="PNG")
-                out.seek(0)
-                return out
+                return io.BytesIO(r.content)
             except requests.RequestException as e:
                 last_err = str(e)
                 time.sleep(1.5 * (attempt + 1))
@@ -170,7 +158,7 @@ def save_excel(items, path="bigc_products.xlsx", embed=False):
         ws.append([i, it.get("category", ""), it["name"], it["image"], it["link"]])
         if embed and it["image"]:
             try:
-                img = XLImage(fetch_png(it["image"]))
+                img = XLImage(fetch_image(it["image"]))
                 col, row = 5, i  # zero-based: column F, row i+1
                 m = 9525 * 3                  # 3px margin inside the cell
                 cell_w = (14 * 7 + 5) * 9525  # column F width 14 chars, in EMU
